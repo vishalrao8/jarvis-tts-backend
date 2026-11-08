@@ -10,9 +10,32 @@ from scipy import signal
 
 HOST = "0.0.0.0"
 PORT = int(os.environ.get("PORT", "8000"))
-PIPER_BIN = os.environ.get("PIPER_BIN", "/app/piper/piper")
-MODEL_PATH = os.environ.get("MODEL_PATH", "/app/model/en_GB-jarvis-high.onnx")
-CONFIG_PATH = os.environ.get("CONFIG_PATH", "/app/model/en_GB-jarvis-high.onnx.json")
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+def find_file(env_name, candidates):
+    if env_name in os.environ and os.path.exists(os.environ[env_name]):
+        return os.environ[env_name]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return candidates[0]
+
+PIPER_BIN = find_file("PIPER_BIN", [
+    "/app/piper/piper",
+    os.path.join(BASE_DIR, "piper", "piper"),
+    "piper"
+])
+
+MODEL_PATH = find_file("MODEL_PATH", [
+    "/app/model/en_GB-jarvis-high.onnx",
+    os.path.join(BASE_DIR, "model", "en_GB-jarvis-high.onnx"),
+])
+
+CONFIG_PATH = find_file("CONFIG_PATH", [
+    "/app/model/en_GB-jarvis-high.onnx.json",
+    os.path.join(BASE_DIR, "model", "en_GB-jarvis-high.onnx.json"),
+])
 
 def level_audio(samples, rate=22050):
     b, a = signal.butter(2, 9500 / (rate / 2), btype="low")
