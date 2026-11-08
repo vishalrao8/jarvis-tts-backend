@@ -1,7 +1,20 @@
 # J.A.R.V.I.S. Cloud Synthesis API
 
 Standalone neural speech synthesis backend for J.A.R.V.I.S. voice models (Piper TTS).
-Containerized and ready for deployment on **Render.com**, **Railway**, **Koyeb**, or any Docker host.
+Containerized and ready for deployment on **Google Cloud Run**, **Render.com**, **Railway**, or any Docker host.
+
+---
+
+## Deploy to Google Cloud Run (Mumbai / asia-south1)
+
+A preconfigured deployment script is provided:
+
+```bash
+chmod +x deploy.sh
+./deploy.sh
+```
+
+This builds the multi-platform image (`linux/amd64`), pushes it to Google Artifact Registry in Mumbai, and deploys it as a serverless container on Cloud Run.
 
 ---
 
