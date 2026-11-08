@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: jarvis-tts-api
+    env: docker
+    plan: free
+    region: oregon
+    healthCheckPath: /health
