@@ -2,8 +2,9 @@
 import os
 import sys
 import json
-import wave
+import struct
 import subprocess
+import urllib.parse
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import numpy as np
 from scipy import signal
@@ -37,24 +38,44 @@ CONFIG_PATH = find_file("CONFIG_PATH", [
     os.path.join(BASE_DIR, "model", "en_GB-jarvis-high.onnx.json"),
 ])
 
-def level_audio(samples, rate=22050):
-    b, a = signal.butter(2, 9500 / (rate / 2), btype="low")
-    filtered = signal.lfilter(b, a, samples)
-
-    max_thresh = 32768.0 * 0.94
-    peak = np.max(np.abs(filtered))
-    if peak > max_thresh:
-        filtered = np.tanh(filtered / max_thresh) * max_thresh
-    elif peak > 0:
-        filtered = filtered * (max_thresh / max(peak, 28000.0))
-
-    return filtered
+def make_wav_header(sample_rate=22050, channels=1, bits_per_sample=16, data_size=0x7fffffff):
+    byte_rate = sample_rate * channels * (bits_per_sample // 8)
+    block_align = channels * (bits_per_sample // 8)
+    riff_size = data_size + 36
+    return struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF",
+        min(riff_size, 0xffffffff),
+        b"WAVE",
+        b"fmt ",
+        16,
+        1,  # PCM
+        channels,
+        sample_rate,
+        byte_rate,
+        block_align,
+        bits_per_sample,
+        b"data",
+        min(data_size, 0xffffffff)
+    )
 
 class SynthesisHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
     def _send_cors_headers(self):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+    def _write_chunk(self, data):
+        if not data:
+            self.wfile.write(b"0\r\n\r\n")
+            self.wfile.flush()
+            return
+        self.wfile.write(f"{len(data):X}\r\n".encode("latin1"))
+        self.wfile.write(data)
+        self.wfile.write(b"\r\n")
+        self.wfile.flush()
 
     def do_OPTIONS(self):
         self.send_response(200)
@@ -62,18 +83,41 @@ class SynthesisHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        if self.path == "/health" or self.path == "/":
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+
+        if path in ("/health", "/"):
             self.send_response(200)
             self._send_cors_headers()
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps({"status": "ready", "service": "jarvis-tts-api"}).encode("utf-8"))
-        else:
-            self.send_response(404)
-            self.end_headers()
+            return
+
+        if path == "/synthesize":
+            params = urllib.parse.parse_qs(parsed.query)
+            text = (params.get("text", [""])[0]).strip()
+            length_scale = float(params.get("length_scale", [1.10])[0])
+            noise_scale = float(params.get("noise_scale", [0.35])[0])
+            noise_w = float(params.get("noise_w", [0.50])[0])
+
+            if not text:
+                self.send_response(400)
+                self._send_cors_headers()
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "text query parameter required"}).encode("utf-8"))
+                return
+
+            self.stream_synthesis(text, length_scale, noise_scale, noise_w)
+            return
+
+        self.send_response(404)
+        self.end_headers()
 
     def do_POST(self):
-        if self.path != "/synthesize":
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path != "/synthesize":
             self.send_response(404)
             self.end_headers()
             return
@@ -84,9 +128,9 @@ class SynthesisHandler(BaseHTTPRequestHandler):
         try:
             data = json.loads(body.decode("utf-8"))
             text = data.get("text", "").strip()
-            length_scale = str(data.get("length_scale", 1.10))
-            noise_scale = str(data.get("noise_scale", 0.35))
-            noise_w = str(data.get("noise_w", 0.50))
+            length_scale = float(data.get("length_scale", 1.10))
+            noise_scale = float(data.get("noise_scale", 0.35))
+            noise_w = float(data.get("noise_w", 0.50))
 
             if not text:
                 self.send_response(400)
@@ -96,42 +140,7 @@ class SynthesisHandler(BaseHTTPRequestHandler):
                 self.wfile.write(json.dumps({"error": "Text parameter is required."}).encode("utf-8"))
                 return
 
-            cmd = [
-                PIPER_BIN,
-                "--model", MODEL_PATH,
-                "--config", CONFIG_PATH,
-                "--noise_scale", noise_scale,
-                "--length_scale", length_scale,
-                "--noise_w", noise_w,
-                "--sentence_silence", "0.22",
-                "--output-raw"
-            ]
-
-            proc = subprocess.run(cmd, input=text.encode("utf-8"), capture_output=True, check=True)
-            raw_pcm = np.frombuffer(proc.stdout, dtype=np.int16).astype(np.float32)
-
-            if len(raw_pcm) == 0:
-                raise RuntimeError("Synthesized audio stream was empty.")
-
-            processed_pcm = level_audio(raw_pcm, rate=22050)
-            final_bytes = processed_pcm.astype(np.int16).tobytes()
-
-            import io
-            wav_buffer = io.BytesIO()
-            with wave.open(wav_buffer, "wb") as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(22050)
-                wf.writeframes(final_bytes)
-
-            wav_data = wav_buffer.getvalue()
-
-            self.send_response(200)
-            self._send_cors_headers()
-            self.send_header("Content-Type", "audio/wav")
-            self.send_header("Content-Length", str(len(wav_data)))
-            self.end_headers()
-            self.wfile.write(wav_data)
+            self.stream_synthesis(text, length_scale, noise_scale, noise_w)
 
         except Exception as e:
             self.send_response(500)
@@ -139,6 +148,65 @@ class SynthesisHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
+
+    def stream_synthesis(self, text, length_scale=1.10, noise_scale=0.35, noise_w=0.50):
+        cmd = [
+            PIPER_BIN,
+            "--model", MODEL_PATH,
+            "--config", CONFIG_PATH,
+            "--noise_scale", str(noise_scale),
+            "--length_scale", str(length_scale),
+            "--noise_w", str(noise_w),
+            "--sentence_silence", "0.22",
+            "--output-raw"
+        ]
+
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        proc.stdin.write(text.encode("utf-8"))
+        proc.stdin.close()
+
+        self.send_response(200)
+        self._send_cors_headers()
+        self.send_header("Content-Type", "audio/wav")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.send_header("Cache-Control", "no-cache, no-store")
+        self.end_headers()
+
+        # 1. Send WAV header chunk immediately
+        header = make_wav_header(sample_rate=22050, channels=1, bits_per_sample=16, data_size=0x7fffffff)
+        self._write_chunk(header)
+
+        # 2. Setup streaming Butterworth filter
+        rate = 22050
+        b, a = signal.butter(2, 9500 / (rate / 2), btype="low")
+        zi = np.zeros(max(len(a), len(b)) - 1, dtype=np.float32)
+        max_thresh = 32768.0 * 0.94
+
+        # 3. Stream PCM audio as Piper generates it in real-time
+        try:
+            while True:
+                raw_bytes = proc.stdout.read(4096)
+                if not raw_bytes:
+                    break
+                pcm = np.frombuffer(raw_bytes, dtype=np.int16).astype(np.float32)
+                filtered, zi = signal.lfilter(b, a, pcm, zi=zi)
+                peak = np.max(np.abs(filtered))
+                if peak > max_thresh:
+                    filtered = np.tanh(filtered / max_thresh) * max_thresh
+                chunk_out = filtered.astype(np.int16).tobytes()
+                self._write_chunk(chunk_out)
+
+            self._write_chunk(b"")
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            proc.stdout.close()
+            proc.wait()
 
 def main():
     server = ThreadingHTTPServer((HOST, PORT), SynthesisHandler)

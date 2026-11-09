@@ -49,8 +49,9 @@ gcloud run deploy $APP_NAME \
     --platform managed \
     --allow-unauthenticated \
     --port 8000 \
-    --memory 1Gi \
-    --cpu 1 \
+    --memory 2Gi \
+    --cpu 2 \
+    --cpu-boost \
     --min-instances 0 \
     --max-instances 5
 
