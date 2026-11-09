@@ -80,6 +80,7 @@ class SynthesisHandler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         self.send_response(200)
         self._send_cors_headers()
+        self.send_header("Content-Length", "0")
         self.end_headers()
 
     def do_GET(self):
@@ -87,11 +88,13 @@ class SynthesisHandler(BaseHTTPRequestHandler):
         path = parsed.path
 
         if path in ("/health", "/"):
+            resp = json.dumps({"status": "ready", "service": "jarvis-tts-api"}).encode("utf-8")
             self.send_response(200)
             self._send_cors_headers()
             self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(resp)))
             self.end_headers()
-            self.wfile.write(json.dumps({"status": "ready", "service": "jarvis-tts-api"}).encode("utf-8"))
+            self.wfile.write(resp)
             return
 
         if path == "/synthesize":
@@ -102,24 +105,36 @@ class SynthesisHandler(BaseHTTPRequestHandler):
             noise_w = float(params.get("noise_w", [0.50])[0])
 
             if not text:
+                err_resp = json.dumps({"error": "text query parameter required"}).encode("utf-8")
                 self.send_response(400)
                 self._send_cors_headers()
                 self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(err_resp)))
                 self.end_headers()
-                self.wfile.write(json.dumps({"error": "text query parameter required"}).encode("utf-8"))
+                self.wfile.write(err_resp)
                 return
 
             self.stream_synthesis(text, length_scale, noise_scale, noise_w)
             return
 
+        err_resp = json.dumps({"error": "Not Found"}).encode("utf-8")
         self.send_response(404)
+        self._send_cors_headers()
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(err_resp)))
         self.end_headers()
+        self.wfile.write(err_resp)
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path != "/synthesize":
+            err_resp = json.dumps({"error": "Not Found"}).encode("utf-8")
             self.send_response(404)
+            self._send_cors_headers()
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(err_resp)))
             self.end_headers()
+            self.wfile.write(err_resp)
             return
 
         content_length = int(self.headers.get("Content-Length", 0))
@@ -133,21 +148,25 @@ class SynthesisHandler(BaseHTTPRequestHandler):
             noise_w = float(data.get("noise_w", 0.50))
 
             if not text:
+                err_resp = json.dumps({"error": "Text parameter is required."}).encode("utf-8")
                 self.send_response(400)
                 self._send_cors_headers()
                 self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(err_resp)))
                 self.end_headers()
-                self.wfile.write(json.dumps({"error": "Text parameter is required."}).encode("utf-8"))
+                self.wfile.write(err_resp)
                 return
 
             self.stream_synthesis(text, length_scale, noise_scale, noise_w)
 
         except Exception as e:
+            err_resp = json.dumps({"error": str(e)}).encode("utf-8")
             self.send_response(500)
             self._send_cors_headers()
             self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(err_resp)))
             self.end_headers()
-            self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
+            self.wfile.write(err_resp)
 
     def stream_synthesis(self, text, length_scale=1.10, noise_scale=0.35, noise_w=0.50):
         cmd = [
@@ -208,7 +227,29 @@ class SynthesisHandler(BaseHTTPRequestHandler):
             proc.stdout.close()
             proc.wait()
 
+def warmup_engine():
+    try:
+        cmd = [
+            PIPER_BIN,
+            "--model", MODEL_PATH,
+            "--config", CONFIG_PATH,
+            "--sentence_silence", "0.0",
+            "--output-raw"
+        ]
+        subprocess.run(
+            cmd,
+            input=b"online",
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10
+        )
+        print("Piper neural model pre-warmed into memory cache.")
+    except Exception as e:
+        print(f"Warmup notice: {e}")
+
 def main():
+    import threading
+    threading.Thread(target=warmup_engine, daemon=True).start()
     server = ThreadingHTTPServer((HOST, PORT), SynthesisHandler)
     print(f"J.A.R.V.I.S. Cloud Synthesis API listening on http://{HOST}:{PORT}")
     try:
